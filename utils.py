@@ -1,12 +1,18 @@
 import os
 import re
+from dataclasses import dataclass
 from typing import List
 
 from pypdf import PdfReader
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import CHUNK_SIZE, CHUNK_OVERLAP
+
+
+@dataclass
+class Chunk:
+    text: str
+    source: str
+    page: int
 
 
 def clean_text(text: str) -> str:
@@ -14,8 +20,8 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-def load_pdfs(pdf_paths: List[str]) -> List[Document]:
-    documents = []
+def load_pdfs(pdf_paths: List[str]) -> List[Chunk]:
+    chunks = []
 
     for pdf_path in pdf_paths:
 
@@ -32,54 +38,55 @@ def load_pdfs(pdf_paths: List[str]) -> List[Document]:
 
             text = clean_text(text)
 
-            documents.append(
-                Document(
-                    page_content=text,
-                    metadata={
-                        "source": filename,
-                        "page": page_number,
-                    },
+            chunks.append(
+                Chunk(
+                    text=text,
+                    source=filename,
+                    page=page_number,
                 )
             )
-
-    return documents
-
-
-def split_documents(documents: List[Document]) -> List[Document]:
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-        separators=[
-            "\n\n",
-            "\n",
-            ". ",
-            " ",
-            "",
-        ],
-    )
-
-    chunks = splitter.split_documents(documents)
-
-    for index, chunk in enumerate(chunks):
-        chunk.metadata["chunk"] = index
 
     return chunks
 
 
-def format_context(documents: List[Document]) -> str:
+def split_chunks(chunks: List[Chunk]) -> List[Chunk]:
+
+    split_documents = []
+
+    for chunk in chunks:
+
+        text = chunk.text
+
+        start = 0
+
+        while start < len(text):
+
+            end = min(start + CHUNK_SIZE, len(text))
+
+            split_documents.append(
+                Chunk(
+                    text=text[start:end],
+                    source=chunk.source,
+                    page=chunk.page,
+                )
+            )
+
+            start += CHUNK_SIZE - CHUNK_OVERLAP
+
+    return split_documents
+
+
+def format_context(chunks: List[Chunk]) -> str:
 
     context = []
 
-    for document in documents:
+    for chunk in chunks:
 
         context.append(
-            f"""
-Document: {document.metadata['source']}
-Page: {document.metadata['page']}
+            f"""Document: {chunk.source}
+Page: {chunk.page}
 
-{document.page_content}
-"""
+{chunk.text}"""
         )
 
     return "\n\n".join(context)
