@@ -1,127 +1,78 @@
-from pathlib import Path
+import os
 import re
-from typing import List
 
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 
-from config import (
-    CHUNK_SIZE,
-    CHUNK_OVERLAP,
-    SEPARATORS,
-)
+from config import CHUNK_SIZE, CHUNK_OVERLAP
 
 
 class DocumentLoader:
-  
 
     def __init__(self):
-        self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=CHUNK_SIZE,
-            chunk_overlap=CHUNK_OVERLAP,
-            separators=SEPARATORS,
-            length_function=len,
-        )
+        self.documents = []
 
+    def clean_text(self, text):
 
-
-    @staticmethod
-    def clean_text(text: str) -> str:
-        """
-        Clean extracted PDF text.
-        """
-
-        if not text:
-            return ""
-
-       
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = text.replace("\x00", "")
+        text = re.sub(r"\s+", " ", text)
 
         return text.strip()
 
+    def load_pdfs(self, pdf_paths):
 
-    def load_pdf(self, pdf_path: str) -> List[Document]:
-        """
-        Read one PDF and return page Documents.
-        """
+        self.documents = []
 
-        documents = []
+        for pdf_path in pdf_paths:
 
-        reader = PdfReader(pdf_path)
+            reader = PdfReader(pdf_path)
 
-        filename = Path(pdf_path).name
+            filename = os.path.basename(pdf_path)
 
-        for page_number, page in enumerate(reader.pages, start=1):
+            for page_number, page in enumerate(reader.pages, start=1):
 
-            text = page.extract_text()
+                text = page.extract_text()
 
-            text = self.clean_text(text)
+                if not text:
+                    continue
 
-            if not text:
-                continue
+                text = self.clean_text(text)
 
-            documents.append(
-                Document(
-                    page_content=text,
-                    metadata={
-                        "source": filename,
-                        "page": page_number,
-                    },
-                )
-            )
+                chunks = self.chunk_text(text)
 
-        return documents
+                for chunk in chunks:
 
-    def load_multiple_pdfs(self, pdf_paths: List[str]) -> List[Document]:
-        """
-        Read multiple PDFs.
-        """
+                    self.documents.append(
+                        {
+                            "text": chunk,
+                            "source": filename,
+                            "page": page_number,
+                        }
+                    )
 
-        all_docs = []
+        return self.documents
 
-        for pdf in pdf_paths:
+    def chunk_text(self, text):
 
-            try:
-                docs = self.load_pdf(pdf)
-                all_docs.extend(docs)
+        chunks = []
 
-            except Exception as e:
+        step = CHUNK_SIZE - CHUNK_OVERLAP
 
-                print(f"Error loading {pdf}: {e}")
+        start = 0
 
-        return all_docs
+        while start < len(text):
 
- 
-    def split_documents(
-        self,
-        documents: List[Document],
-    ) -> List[Document]:
-        """
-        Chunk the documents while preserving metadata.
-        """
+            end = min(start + CHUNK_SIZE, len(text))
 
-        chunks = self.splitter.split_documents(documents)
+            if end < len(text):
 
-        for i, chunk in enumerate(chunks):
+                while end > start and text[end] != " ":
+                    end -= 1
 
-            chunk.metadata["chunk_id"] = i
+            chunk = text[start:end].strip()
 
-        return chunks
+            if chunk:
 
+                chunks.append(chunk)
 
-    def load_and_split(
-        self,
-        pdf_paths: List[str],
-    ) -> List[Document]:
-        """
-        Complete pipeline.
-        """
-
-        docs = self.load_multiple_pdfs(pdf_paths)
-
-        chunks = self.split_documents(docs)
+            start += step
 
         return chunks
