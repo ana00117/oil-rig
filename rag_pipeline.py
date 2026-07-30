@@ -1,62 +1,124 @@
-"""End-to-end RAG pipeline: process documents, then answer questions."""
+from typing import List
 
-import os
-from dotenv import load_dotenv
+from langchain.schema import Document
+from langchain_groq import ChatGroq
 
-from document_loader import load_pdfs_from_uploads
-from vector_store import (
-    chunk_documents,
-    build_vector_store,
-    save_vector_store,
-    retrieve,
-    get_embedding_model,
+from config import (
+    FINAL_TOP_K,
+    GROQ_API_KEY,
+    LLM_MODEL,
+    MAX_TOKENS,
+    TEMPERATURE,
 )
-from prompt import build_prompt
 
-load_dotenv()
+from memory import ConversationMemory
+from prompts import prompt
+from reranker import Reranker
+from retriever import HybridRetriever
 
 
 class RAGPipeline:
-    def __init__(self, model_name="llama-3.3-70b-versatile", top_k=4):
-        self.top_k = top_k
-        self.model_name = model_name
-        self.embedding_model = get_embedding_model()
-        self.vector_store = None
-        self.llm = self._load_llm()
 
-    def _load_llm(self):
-        from langchain_groq import ChatGroq
+    def __init__(
+        self,
+        retriever: HybridRetriever,
+        memory: ConversationMemory,
+    ):
+        self.retriever = retriever
+        self.memory = memory
+        self.reranker = Reranker()
 
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError("GROQ_API_KEY not found. Add it to your .env file.")
-
-        return ChatGroq(
-            model=self.model_name, groq_api_key=api_key, temperature=0
+        self.llm = ChatGroq(
+            api_key=GROQ_API_KEY,
+            model=LLM_MODEL,
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
         )
 
-    def process_documents(self, uploaded_files):
-        """Extract, chunk, embed, and index uploaded PDFs. Returns (num_pages, num_chunks)."""
-        documents = load_pdfs_from_uploads(uploaded_files)
-        if not documents:
-            raise ValueError("No extractable text found in the uploaded PDFs.")
+    def build_context(
+        self,
+        documents: List[Document],
+    ) -> str:
 
-        chunks = chunk_documents(documents)
-        self.vector_store = build_vector_store(chunks, self.embedding_model)
-        save_vector_store(self.vector_store)
-        return len(documents), len(chunks)
+        context = []
 
-    def ask(self, question):
-        """Retrieve relevant chunks and generate a grounded answer with sources."""
-        if self.vector_store is None:
-            raise ValueError("No documents processed yet. Upload and process PDFs first.")
+        for document in documents:
 
-        chunks = retrieve(self.vector_store, question, k=self.top_k)
-        prompt_text = build_prompt(chunks, question)
-        response = self.llm.invoke(prompt_text)
+            source = document.metadata.get("source", "Unknown")
 
-        sources = [
-            {"source": c.metadata.get("source"), "page": c.metadata.get("page")}
-            for c in chunks
-        ]
-        return response.content, sources
+            page = document.metadata.get("page", "Unknown")
+
+            context.append(
+                f"""
+Document: {source}
+Page: {page}
+
+{document.page_content}
+"""
+            )
+
+        return "\n\n".join(context)
+
+    def ask(
+        self,
+        question: str,
+    ):
+
+        retrieved_documents = self.retriever.hybrid_search(
+            query=question
+        )
+
+        reranked_documents = self.reranker.rerank(
+            query=question,
+            documents=retrieved_documents,
+            top_k=FINAL_TOP_K,
+        )
+
+        context = self.build_context(reranked_documents)
+
+        history = self.memory.get_context()
+
+        chain = prompt | self.llm
+
+        response = chain.invoke(
+            {
+                "history": history,
+                "context": context,
+                "question": question,
+            }
+        )
+
+        answer = response.content
+
+        self.memory.add_user_message(question)
+        self.memory.add_assistant_message(answer)
+
+        sources = []
+
+        seen = set()
+
+        for document in reranked_documents:
+
+            source = (
+                document.metadata.get("source"),
+                document.metadata.get("page"),
+            )
+
+            if source not in seen:
+
+                seen.add(source)
+
+                sources.append(
+                    {
+                        "document": source[0],
+                        "page": source[1],
+                    }
+                )
+
+        return {
+            "answer": answer,
+            "sources": sources,
+        }
+
+    def clear_memory(self):
+        self.memory.clear()
