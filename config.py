@@ -1,40 +1,25 @@
-from dotenv import load_dotenv
 import os
+from dotenv import load_dotenv
 
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-LLM_MODEL = "llama-3.3-70b-versatile"
+MODEL_NAME = "llama-3.1-8b-instant"
 
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
-RERANKER_MODEL = "BAAI/bge-reranker-base"
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
 
-TEMPERATURE = 0.1
-MAX_TOKENS = 1024
-
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 150
-
-SEPARATORS = [
-    "\n\n",
-    "\n",
-    ". ",
-    " ",
-    "",
-]
-
-TOP_K_RETRIEVAL = 8
-FINAL_TOP_K = 4
-
-VECTOR_DB_PATH = "vector_store"
+TOP_K = 8
 
 UPLOAD_FOLDER = "uploads"
+VECTOR_STORE_PATH = "faiss_index"
 
-ALLOWED_FILE_TYPES = [".pdf"]
+SUPPORTED_FILE_TYPES = ["pdf"]
 
-MEMORY_SIZE = 10
-
-APP_TITLE = "ChemE RAG Assistant"
+PAGE_TITLE = "ChemE RAG Assistant"
 PAGE_ICON = "🤖"
+
+MAX_HISTORY = 10
