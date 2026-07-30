@@ -1,58 +1,127 @@
-"""PDF loading and text extraction with page-level metadata."""
-
 from pathlib import Path
+import re
+from typing import List
+
+from langchain.schema import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 
+from config import (
+    CHUNK_SIZE,
+    CHUNK_OVERLAP,
+    SEPARATORS,
+)
 
-def load_pdfs(file_paths):
-    """
-    Extract text from one or more PDF files, skipping empty pages.
 
-    Args:
-        file_paths: list of paths (str or Path) to PDF files.
+class DocumentLoader:
+  
 
-    Returns:
-        List of dicts: {"text": str, "source": str, "page": int}
-    """
-    documents = []
+    def __init__(self):
+        self.splitter = RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP,
+            separators=SEPARATORS,
+            length_function=len,
+        )
 
-    for file_path in file_paths:
-        file_path = Path(file_path)
-        reader = PdfReader(str(file_path))
 
-        for page_num, page in enumerate(reader.pages, start=1):
+
+    @staticmethod
+    def clean_text(text: str) -> str:
+        """
+        Clean extracted PDF text.
+        """
+
+        if not text:
+            return ""
+
+       
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = text.replace("\x00", "")
+
+        return text.strip()
+
+
+    def load_pdf(self, pdf_path: str) -> List[Document]:
+        """
+        Read one PDF and return page Documents.
+        """
+
+        documents = []
+
+        reader = PdfReader(pdf_path)
+
+        filename = Path(pdf_path).name
+
+        for page_number, page in enumerate(reader.pages, start=1):
+
             text = page.extract_text()
-            if not text or not text.strip():
+
+            text = self.clean_text(text)
+
+            if not text:
                 continue
 
-            documents.append({
-                "text": text.strip(),
-                "source": file_path.name,
-                "page": page_num,
-            })
+            documents.append(
+                Document(
+                    page_content=text,
+                    metadata={
+                        "source": filename,
+                        "page": page_number,
+                    },
+                )
+            )
 
-    return documents
+        return documents
+
+    def load_multiple_pdfs(self, pdf_paths: List[str]) -> List[Document]:
+        """
+        Read multiple PDFs.
+        """
+
+        all_docs = []
+
+        for pdf in pdf_paths:
+
+            try:
+                docs = self.load_pdf(pdf)
+                all_docs.extend(docs)
+
+            except Exception as e:
+
+                print(f"Error loading {pdf}: {e}")
+
+        return all_docs
+
+ 
+    def split_documents(
+        self,
+        documents: List[Document],
+    ) -> List[Document]:
+        """
+        Chunk the documents while preserving metadata.
+        """
+
+        chunks = self.splitter.split_documents(documents)
+
+        for i, chunk in enumerate(chunks):
+
+            chunk.metadata["chunk_id"] = i
+
+        return chunks
 
 
-def load_pdfs_from_uploads(uploaded_files, save_dir="documents"):
-    """
-    Save Streamlit UploadedFile objects to disk, then extract text.
+    def load_and_split(
+        self,
+        pdf_paths: List[str],
+    ) -> List[Document]:
+        """
+        Complete pipeline.
+        """
 
-    Args:
-        uploaded_files: list of Streamlit UploadedFile objects.
-        save_dir: directory to save the uploaded PDFs.
+        docs = self.load_multiple_pdfs(pdf_paths)
 
-    Returns:
-        List of dicts: {"text": str, "source": str, "page": int}
-    """
-    save_path = Path(save_dir)
-    save_path.mkdir(parents=True, exist_ok=True)
+        chunks = self.split_documents(docs)
 
-    saved_paths = []
-    for uploaded_file in uploaded_files:
-        dest = save_path / uploaded_file.name
-        with open(dest, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        saved_paths.append(dest)
-
-    return load_pdfs(saved_paths)
+        return chunks
