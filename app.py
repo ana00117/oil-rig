@@ -1,5 +1,6 @@
 import os
 import tempfile
+
 import streamlit as st
 
 from config import (
@@ -8,12 +9,8 @@ from config import (
     SUPPORTED_FILE_TYPES,
 )
 
-from utils import (
-    load_pdfs,
-    split_chunks,
-)
-
-from rag import RAG
+from document_loader import DocumentLoader
+from rag_pipeline import RAGPipeline
 
 
 st.set_page_config(
@@ -23,18 +20,19 @@ st.set_page_config(
 )
 
 st.title("🤖 ChemE RAG Assistant")
+st.caption("Upload PDF documents and ask questions from them.")
 
-st.caption("Upload one or more PDFs and ask questions about them.")
 
-
-if "rag" not in st.session_state:
-    st.session_state.rag = RAG()
-
-if "ready" not in st.session_state:
-    st.session_state.ready = False
+if "pipeline" not in st.session_state:
+    st.session_state.pipeline = RAGPipeline()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+if "documents_loaded" not in st.session_state:
+    st.session_state.documents_loaded = (
+        st.session_state.pipeline.vector_store.exists()
+    )
 
 if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = []
@@ -42,10 +40,10 @@ if "uploaded_files" not in st.session_state:
 
 with st.sidebar:
 
-    st.header("Knowledge Base")
+    st.header("📂 Documents")
 
     uploaded_files = st.file_uploader(
-        "Upload PDF files",
+        "Upload PDF Files",
         type=SUPPORTED_FILE_TYPES,
         accept_multiple_files=True,
     )
@@ -60,44 +58,30 @@ with st.sidebar:
         use_container_width=True,
     )
 
-    rebuild = st.button(
-        "Rebuild Index",
-        use_container_width=True,
-    )
-
     st.divider()
 
-    if st.session_state.ready:
+    if st.session_state.documents_loaded:
 
         st.success("Knowledge Base Ready")
 
-        for file in st.session_state.uploaded_files:
+        if st.session_state.uploaded_files:
 
-            st.write(f"📄 {file}")
+            st.write("Indexed Files")
+
+            for file in st.session_state.uploaded_files:
+
+                st.write(f"📄 {file}")
 
     else:
 
-        st.info("No documents indexed.")
+        st.info("Upload documents to begin.")
 
 
 if clear_chat:
 
     st.session_state.messages = []
 
-    st.session_state.rag.history = []
-
-    st.rerun()
-
-
-if rebuild:
-
-    st.session_state.rag = RAG()
-
-    st.session_state.messages = []
-
-    st.session_state.ready = False
-
-    st.session_state.uploaded_files = []
+    st.session_state.pipeline.chat_history = []
 
     st.rerun()
 
@@ -112,33 +96,33 @@ if process:
 
     pdf_paths = []
 
-    with st.spinner("Reading PDFs..."):
+    with st.spinner("Processing documents..."):
 
-        for file in uploaded_files:
+        for uploaded_file in uploaded_files:
 
             with tempfile.NamedTemporaryFile(
                 delete=False,
                 suffix=".pdf",
             ) as temp:
 
-                temp.write(file.read())
+                temp.write(uploaded_file.read())
 
                 pdf_paths.append(temp.name)
 
-        chunks = load_pdfs(pdf_paths)
+        loader = DocumentLoader()
 
-        chunks = split_chunks(chunks)
+        documents = loader.load_pdfs(pdf_paths)
 
-    with st.spinner("Building knowledge base..."):
+        st.session_state.pipeline.build_vector_store(
+            documents
+        )
 
-        st.session_state.rag.build(chunks)
+        st.session_state.documents_loaded = True
 
-    st.session_state.ready = True
-
-    st.session_state.uploaded_files = [
-        file.name
-        for file in uploaded_files
-    ]
+        st.session_state.uploaded_files = [
+            file.name
+            for file in uploaded_files
+        ]
 
     for path in pdf_paths:
 
@@ -146,7 +130,7 @@ if process:
 
             os.remove(path)
 
-    st.success("Knowledge base created successfully!")
+    st.success("Documents processed successfully.")
 
     st.rerun()
 
@@ -159,23 +143,26 @@ for message in st.session_state.messages:
 
         st.markdown(message["content"])
 
-        if message["role"] == "assistant":
+        if (
+            message["role"] == "assistant"
+            and "sources" in message
+        ):
 
-            if message.get("sources"):
+            with st.expander("Sources"):
 
-                with st.expander("Sources"):
+                for source in message["sources"]:
 
-                    for source in message["sources"]:
+                    st.markdown(
+                        f"**📄 {source['document']}** (Page {source['page']})"
+                    )
 
-                        st.write(
-                            f"📄 {source['document']} — Page {source['page']}"
-                        )
+                    st.caption(source["text"])
 
 
-if not st.session_state.ready:
+if not st.session_state.documents_loaded:
 
     st.info(
-        "Upload PDFs and click **Process Documents** to begin."
+        "Upload PDF documents and click **Process Documents**."
     )
 
     st.stop()
@@ -195,35 +182,40 @@ if prompt:
 
     with st.chat_message("assistant"):
 
+        placeholder = st.empty()
+
         try:
 
             with st.spinner("Thinking..."):
 
-                answer, sources = st.session_state.rag.ask(prompt)
+                answer, sources = (
+                    st.session_state.pipeline.ask(prompt)
+                )
 
-            st.markdown(answer)
+            placeholder.markdown(answer)
 
             if sources:
 
-                with st.expander("Sources", expanded=False):
-
-                    displayed = set()
+                with st.expander(
+                    "📚 Sources",
+                    expanded=False,
+                ):
 
                     for source in sources:
 
-                        key = (
-                            source["document"],
-                            source["page"],
-                        )
-
-                        if key in displayed:
-                            continue
-
-                        displayed.add(key)
-
                         st.markdown(
-                            f"📄 **{source['document']}** — Page {source['page']}"
+                            f"**📄 {source['document']}**"
                         )
+
+                        st.write(
+                            f"**Page:** {source['page']}"
+                        )
+
+                        st.caption(
+                            source["text"]
+                        )
+
+                        st.divider()
 
             st.session_state.messages.append(
                 {
@@ -235,12 +227,14 @@ if prompt:
 
         except Exception as e:
 
-            st.error(str(e))
+            placeholder.error(
+                f"Error: {str(e)}"
+            )
 
             st.session_state.messages.append(
                 {
                     "role": "assistant",
-                    "content": f"Error: {e}",
+                    "content": f"Error: {str(e)}",
                     "sources": [],
                 }
             )
