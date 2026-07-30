@@ -37,7 +37,7 @@ ALLOWED_FILE_TYPES = [".pdf"]
 MEMORY_SIZE = 10
 
 APP_TITLE = "ChemE RAG Assistant"
-PAGE_ICON = ""
+PAGE_ICON = "🤖"
 
 
 .strip()
