@@ -1,120 +1,164 @@
 import os
-from typing import List
+import json
+import pickle
 
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.schema import Document
+import faiss
+import numpy as np
+
+from sentence_transformers import SentenceTransformer
 
 from config import (
     EMBEDDING_MODEL,
-    VECTOR_DB_PATH,
+    VECTOR_STORE_PATH,
+    TOP_K,
 )
 
 
-class VectorStoreManager:
+class VectorStore:
 
     def __init__(self):
 
-        self.embedding_model = HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL,
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True},
+        self.model = SentenceTransformer(
+            EMBEDDING_MODEL
         )
 
-        self.vector_store = None
+        self.index = None
 
-    def create_vector_store(
-        self,
-        documents: List[Document],
-    ):
-        """
-        Build a FAISS index from documents.
-        """
+        self.documents = []
 
-        self.vector_store = FAISS.from_documents(
-            documents=documents,
-            embedding=self.embedding_model,
+    def build(self, documents):
+
+        self.documents = documents
+
+        texts = [
+            doc["text"]
+            for doc in documents
+        ]
+
+        embeddings = self.model.encode(
+            texts,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
         )
 
-        return self.vector_store
+        dimension = embeddings.shape[1]
+
+        self.index = faiss.IndexFlatIP(
+            dimension
+        )
+
+        self.index.add(
+            embeddings.astype("float32")
+        )
+
+        self.save()
 
     def save(self):
-        """
-        Save FAISS index locally.
-        """
 
-        if self.vector_store is None:
-            raise ValueError("Vector store has not been created.")
+        os.makedirs(
+            VECTOR_STORE_PATH,
+            exist_ok=True,
+        )
 
-        self.vector_store.save_local(VECTOR_DB_PATH)
+        faiss.write_index(
+            self.index,
+            os.path.join(
+                VECTOR_STORE_PATH,
+                "index.faiss",
+            ),
+        )
 
-    def load(self):
-        """
-        Load saved FAISS index.
-        """
+        with open(
+            os.path.join(
+                VECTOR_STORE_PATH,
+                "metadata.pkl",
+            ),
+            "wb",
+        ) as f:
 
-        if not os.path.exists(VECTOR_DB_PATH):
-            raise FileNotFoundError(
-                f"{VECTOR_DB_PATH} does not exist."
+            pickle.dump(
+                self.documents,
+                f,
             )
 
-        self.vector_store = FAISS.load_local(
-            VECTOR_DB_PATH,
-            self.embedding_model,
-            allow_dangerous_deserialization=True,
+        with open(
+            os.path.join(
+                VECTOR_STORE_PATH,
+                "config.json",
+            ),
+            "w",
+        ) as f:
+
+            json.dump(
+                {
+                    "embedding_model": EMBEDDING_MODEL,
+                },
+                f,
+                indent=4,
+            )
+
+    def load(self):
+
+        self.index = faiss.read_index(
+            os.path.join(
+                VECTOR_STORE_PATH,
+                "index.faiss",
+            )
         )
 
-        return self.vector_store
+        with open(
+            os.path.join(
+                VECTOR_STORE_PATH,
+                "metadata.pkl",
+            ),
+            "rb",
+        ) as f:
 
-    def similarity_search(
+            self.documents = pickle.load(f)
+
+    def exists(self):
+
+        return os.path.exists(
+            os.path.join(
+                VECTOR_STORE_PATH,
+                "index.faiss",
+            )
+        )
+
+    def search(
         self,
-        query: str,
-        k: int = 8,
+        query,
+        top_k=TOP_K,
     ):
-        """
-        Standard similarity search.
-        """
 
-        if self.vector_store is None:
-            raise ValueError("Vector store is not loaded.")
-
-        return self.vector_store.similarity_search(
-            query=query,
-            k=k,
+        embedding = self.model.encode(
+            query,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
         )
 
-
-    def similarity_search_with_scores(
-        self,
-        query: str,
-        k: int = 8,
-    ):
-        """
-        Returns documents with similarity scores.
-        """
-
-        if self.vector_store is None:
-            raise ValueError("Vector store is not loaded.")
-
-        return self.vector_store.similarity_search_with_score(
-            query=query,
-            k=k,
+        scores, indices = self.index.search(
+            np.array(
+                [embedding],
+                dtype="float32",
+            ),
+            top_k,
         )
 
-    
-    def as_retriever(
-        self,
-        k: int = 8,
-    ):
-        """
-        Convert to LangChain retriever.
-        """
+        results = []
 
-        if self.vector_store is None:
-            raise ValueError("Vector store is not loaded.")
+        for score, index in zip(
+            scores[0],
+            indices[0],
+        ):
 
-        return self.vector_store.as_retriever(
-            search_kwargs={
-                "k": k
-            }
-        )
+            if index == -1:
+                continue
+
+            doc = self.documents[index].copy()
+
+            doc["score"] = float(score)
+
+            results.append(doc)
+
+        return results
