@@ -1,67 +1,120 @@
-"""Chunking, embeddings, and FAISS vector store."""
+import os
+from typing import List
 
-from pathlib import Path
-
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.documents import Document
+from langchain.schema import Document
 
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 120
+from config import (
+    EMBEDDING_MODEL,
+    VECTOR_DB_PATH,
+)
 
 
-def chunk_documents(documents, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP):
-    """
-    Split extracted page text into overlapping chunks.
+class VectorStoreManager:
 
-    Args:
-        documents: list of {"text", "source", "page"} dicts.
+    def __init__(self):
 
-    Returns:
-        List of langchain Document objects with source/page metadata.
-    """
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ". ", " ", ""],
-    )
+        self.embedding_model = HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL,
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
+        )
 
-    chunks = []
-    for doc in documents:
-        for chunk_text in splitter.split_text(doc["text"]):
-            chunks.append(
-                Document(
-                    page_content=chunk_text,
-                    metadata={"source": doc["source"], "page": doc["page"]},
-                )
+        self.vector_store = None
+
+    def create_vector_store(
+        self,
+        documents: List[Document],
+    ):
+        """
+        Build a FAISS index from documents.
+        """
+
+        self.vector_store = FAISS.from_documents(
+            documents=documents,
+            embedding=self.embedding_model,
+        )
+
+        return self.vector_store
+
+    def save(self):
+        """
+        Save FAISS index locally.
+        """
+
+        if self.vector_store is None:
+            raise ValueError("Vector store has not been created.")
+
+        self.vector_store.save_local(VECTOR_DB_PATH)
+
+    def load(self):
+        """
+        Load saved FAISS index.
+        """
+
+        if not os.path.exists(VECTOR_DB_PATH):
+            raise FileNotFoundError(
+                f"{VECTOR_DB_PATH} does not exist."
             )
-    return chunks
+
+        self.vector_store = FAISS.load_local(
+            VECTOR_DB_PATH,
+            self.embedding_model,
+            allow_dangerous_deserialization=True,
+        )
+
+        return self.vector_store
+
+    def similarity_search(
+        self,
+        query: str,
+        k: int = 8,
+    ):
+        """
+        Standard similarity search.
+        """
+
+        if self.vector_store is None:
+            raise ValueError("Vector store is not loaded.")
+
+        return self.vector_store.similarity_search(
+            query=query,
+            k=k,
+        )
 
 
-def get_embedding_model():
-    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    def similarity_search_with_scores(
+        self,
+        query: str,
+        k: int = 8,
+    ):
+        """
+        Returns documents with similarity scores.
+        """
 
+        if self.vector_store is None:
+            raise ValueError("Vector store is not loaded.")
 
-def build_vector_store(chunks, embedding_model=None):
-    """Embed chunks and build a FAISS index."""
-    embedding_model = embedding_model or get_embedding_model()
-    return FAISS.from_documents(chunks, embedding_model)
+        return self.vector_store.similarity_search_with_score(
+            query=query,
+            k=k,
+        )
 
+    
+    def as_retriever(
+        self,
+        k: int = 8,
+    ):
+        """
+        Convert to LangChain retriever.
+        """
 
-def save_vector_store(vector_store, path="vector_store/saved_index"):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    vector_store.save_local(path)
+        if self.vector_store is None:
+            raise ValueError("Vector store is not loaded.")
 
-
-def load_vector_store(path="vector_store/saved_index", embedding_model=None):
-    embedding_model = embedding_model or get_embedding_model()
-    return FAISS.load_local(
-        path, embedding_model, allow_dangerous_deserialization=True
-    )
-
-
-def retrieve(vector_store, query, k=4):
-    """Return the top-k most relevant chunks for a query."""
-    return vector_store.similarity_search(query, k=k)
+        return self.vector_store.as_retriever(
+            search_kwargs={
+                "k": k
+            }
+        )
