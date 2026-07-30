@@ -1,124 +1,212 @@
+import pickle
 from typing import List
 
-from langchain.schema import Document
-from langchain_groq import ChatGroq
+import faiss
+import numpy as np
+from groq import Groq
+from rank_bm25 import BM25Okapi
+from sentence_transformers import SentenceTransformer
 
 from config import (
-    FINAL_TOP_K,
+    EMBEDDING_MODEL,
     GROQ_API_KEY,
-    LLM_MODEL,
-    MAX_TOKENS,
-    TEMPERATURE,
+    MODEL_NAME,
+    TOP_K,
+    VECTOR_STORE_PATH,
 )
 
-from memory import ConversationMemory
-from prompts import prompt
-from reranker import Reranker
-from retriever import HybridRetriever
+from prompts import build_prompt
+from utils import Chunk, format_context
 
 
-class RAGPipeline:
+class RAG:
 
-    def __init__(
-        self,
-        retriever: HybridRetriever,
-        memory: ConversationMemory,
-    ):
-        self.retriever = retriever
-        self.memory = memory
-        self.reranker = Reranker()
+    def __init__(self):
 
-        self.llm = ChatGroq(
-            api_key=GROQ_API_KEY,
-            model=LLM_MODEL,
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
+        self.embedding_model = SentenceTransformer(
+            EMBEDDING_MODEL
         )
 
-    def build_context(
-        self,
-        documents: List[Document],
-    ) -> str:
+        self.client = Groq(
+            api_key=GROQ_API_KEY
+        )
 
-        context = []
+        self.index = None
 
-        for document in documents:
+        self.chunks = []
 
-            source = document.metadata.get("source", "Unknown")
+        self.bm25 = None
 
-            page = document.metadata.get("page", "Unknown")
+        self.history = []
 
-            context.append(
-                f"""
-Document: {source}
-Page: {page}
+    def build(self, chunks: List[Chunk]):
 
-{document.page_content}
-"""
+        self.chunks = chunks
+
+        embeddings = self.embedding_model.encode(
+            [chunk.text for chunk in chunks],
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+
+        dimension = embeddings.shape[1]
+
+        self.index = faiss.IndexFlatIP(
+            dimension
+        )
+
+        self.index.add(
+            embeddings.astype("float32")
+        )
+
+        corpus = [
+            chunk.text.lower().split()
+            for chunk in chunks
+        ]
+
+        self.bm25 = BM25Okapi(corpus)
+
+        faiss.write_index(
+            self.index,
+            f"{VECTOR_STORE_PATH}/index.faiss",
+        )
+
+        with open(
+            f"{VECTOR_STORE_PATH}/chunks.pkl",
+            "wb",
+        ) as f:
+
+            pickle.dump(
+                chunks,
+                f,
             )
 
-        return "\n\n".join(context)
+    def load(self):
+
+        self.index = faiss.read_index(
+            f"{VECTOR_STORE_PATH}/index.faiss"
+        )
+
+        with open(
+            f"{VECTOR_STORE_PATH}/chunks.pkl",
+            "rb",
+        ) as f:
+
+            self.chunks = pickle.load(f)
+
+        corpus = [
+            chunk.text.lower().split()
+            for chunk in self.chunks
+        ]
+
+        self.bm25 = BM25Okapi(corpus)
+
+    def retrieve(
+        self,
+        question: str,
+    ):
+
+        query_embedding = self.embedding_model.encode(
+            question,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+
+        _, semantic_indices = self.index.search(
+            np.array(
+                [query_embedding],
+                dtype="float32",
+            ),
+            TOP_K,
+        )
+
+        semantic = [
+            self.chunks[i]
+            for i in semantic_indices[0]
+        ]
+
+        keyword_scores = self.bm25.get_scores(
+            question.lower().split()
+        )
+
+        keyword_indices = np.argsort(
+            keyword_scores
+        )[::-1][:TOP_K]
+
+        keyword = [
+            self.chunks[i]
+            for i in keyword_indices
+        ]
+
+        merged = []
+
+        seen = set()
+
+        for chunk in semantic + keyword:
+
+            key = (
+                chunk.source,
+                chunk.page,
+                chunk.text[:100],
+            )
+
+            if key not in seen:
+
+                seen.add(key)
+
+                merged.append(chunk)
+
+        return merged[:TOP_K]
 
     def ask(
         self,
         question: str,
     ):
 
-        retrieved_documents = self.retriever.hybrid_search(
-            query=question
+        chunks = self.retrieve(
+            question
         )
 
-        reranked_documents = self.reranker.rerank(
-            query=question,
-            documents=retrieved_documents,
-            top_k=FINAL_TOP_K,
+        context = format_context(
+            chunks
         )
 
-        context = self.build_context(reranked_documents)
+        history = "\n".join(
+            self.history[-10:]
+        )
 
-        history = self.memory.get_context()
+        prompt = build_prompt(
+            question,
+            context,
+            history,
+        )
 
-        chain = prompt | self.llm
+        response = self.client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+        )
 
-        response = chain.invoke(
+        answer = response.choices[0].message.content
+
+        self.history.append(
+            f"User: {question}"
+        )
+
+        self.history.append(
+            f"Assistant: {answer}"
+        )
+
+        sources = [
             {
-                "history": history,
-                "context": context,
-                "question": question,
+                "document": chunk.source,
+                "page": chunk.page,
             }
-        )
+            for chunk in chunks
+        ]
 
-        answer = response.content
-
-        self.memory.add_user_message(question)
-        self.memory.add_assistant_message(answer)
-
-        sources = []
-
-        seen = set()
-
-        for document in reranked_documents:
-
-            source = (
-                document.metadata.get("source"),
-                document.metadata.get("page"),
-            )
-
-            if source not in seen:
-
-                seen.add(source)
-
-                sources.append(
-                    {
-                        "document": source[0],
-                        "page": source[1],
-                    }
-                )
-
-        return {
-            "answer": answer,
-            "sources": sources,
-        }
-
-    def clear_memory(self):
-        self.memory.clear()
+        return answer, sources
